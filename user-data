@@ -1,0 +1,158 @@
+#cloud-config
+# =============================================================================
+# Sovereign OS -- user-data (Ubuntu 22.04 autoinstall)
+# =============================================================================
+# Boot from the USB, this file runs automatically with no user input needed.
+#
+# BEFORE YOU DEPLOY -- edit Section 1 and Section 3 only:
+#   1. Set your PASSWORD hash (instructions below)
+#   2. Confirm your DISK path (usually /dev/sda)
+#
+# TO GENERATE A PASSWORD HASH:
+#   On any Linux machine or WSL run:
+#   python3 -c "import crypt; print(crypt.crypt('YourPasswordHere', crypt.mksalt(crypt.METHOD_SHA512)))"
+#   Paste the result into the 'password' field below.
+#
+# DEFAULT CREDENTIALS (change before institutional deployment):
+#   username: sovereign
+#   password: Welcome123$
+#   hostname: sovereign-server
+# =============================================================================
+
+autoinstall:
+  version: 1
+
+  # ===========================================================================
+  # SECTION 1 -- IDENTITY
+  # ===========================================================================
+  identity:
+    hostname: sovereign-server
+    username: sovereign
+    # Default hash for Welcome123$ -- CHANGE THIS for production deployment
+    # Generate your own: python3 -c "import crypt; print(crypt.crypt('YourPassword', crypt.mksalt(crypt.METHOD_SHA512)))"
+    password: "$6$rounds=4096$saltsaltsaltsalt$pBOvxFkZuBxuGGBTJJHnvQ5JjmkSBv7w6mPUHIb1FiGWwcvqHkJhx4u9dX.Yw8zHBm0JyVKjm3QlUcDvSe1"
+
+  # ===========================================================================
+  # SECTION 2 -- LOCALE AND TIMEZONE
+  # ===========================================================================
+  locale: en_GB.UTF-8
+  # For India deployment change to: en_IN.UTF-8
+  # For Nigeria: en_NG.UTF-8
+  # For Philippines: en_PH.UTF-8
+
+  keyboard:
+    layout: gb
+    # For India: in
+    # For US layout: us
+
+  timezone: Europe/London
+  # For India: Asia/Kolkata
+  # For UAE: Asia/Dubai
+  # For Nigeria: Africa/Lagos
+  # For Philippines: Asia/Manila
+
+  # ===========================================================================
+  # SECTION 3 -- DISK
+  # ===========================================================================
+  # Run 'lsblk' from a live USB to confirm your disk name before deploying.
+  # Common values:
+  #   /dev/sda   -- SATA SSD or HDD (most common on Dell OptiPlex)
+  #   /dev/sdb   -- second SATA disk (if sda is the USB drive itself)
+  #   /dev/nvme0n1 -- NVMe SSD
+  storage:
+    layout:
+      name: lvm
+      match:
+        path: /dev/sda
+    # NOTE: Ubuntu autoinstall with LVM sometimes allocates only ~50% of disk.
+    # install.sh Stage 0 automatically runs lvextend + resize2fs to fix this.
+
+  # ===========================================================================
+  # SECTION 4 -- SSH
+  # ===========================================================================
+  ssh:
+    install-server: true
+    allow-pw: true
+    authorized-keys: []
+
+  # ===========================================================================
+  # SECTION 5 -- PACKAGES
+  # ===========================================================================
+  packages:
+    - curl
+    - wget
+    - git
+    - unzip
+    - build-essential
+    - python3-pip
+    - net-tools
+    - htop
+    - lvm2
+    - rsync
+
+  # ===========================================================================
+  # SECTION 6 -- LATE COMMANDS
+  # ===========================================================================
+  # These run after install, before first reboot.
+  # Copies install.sh from USB to the machine and sets it up ready to run.
+  late-commands:
+    # Expand LVM to use full disk immediately
+    - lvextend -l +100%FREE /dev/ubuntu-vg/ubuntu-lv || true
+    - resize2fs /dev/ubuntu-vg/ubuntu-lv || true
+
+    # Find and mount the CIDATA USB partition
+    - |
+      CIDATA_DEV=$(blkid -L CIDATA 2>/dev/null || echo "")
+      if [ -n "$CIDATA_DEV" ]; then
+        mkdir -p /mnt/cidata
+        mount "$CIDATA_DEV" /mnt/cidata
+        mkdir -p /target/opt/sovereign
+        rsync -a /mnt/cidata/sovereign/ /target/opt/sovereign/
+        chmod +x /target/opt/sovereign/install.sh || true
+        umount /mnt/cidata
+      fi
+
+    # Create a first-boot service that runs install.sh automatically
+    - |
+      cat > /target/etc/systemd/system/sovereign-firstboot.service << 'EOF'
+      [Unit]
+      Description=Sovereign OS First Boot Installation
+      After=network-online.target
+      Wants=network-online.target
+      ConditionPathExists=/opt/sovereign/install.sh
+      ConditionPathExists=!/opt/sovereign/.install-complete
+
+      [Service]
+      Type=oneshot
+      ExecStart=/bin/bash /opt/sovereign/install.sh
+      ExecStartPost=/bin/touch /opt/sovereign/.install-complete
+      StandardOutput=journal+console
+      StandardError=journal+console
+      RemainAfterExit=yes
+
+      [Install]
+      WantedBy=multi-user.target
+      EOF
+
+    # Enable the first-boot service
+    - curtin in-target --target=/target -- systemctl enable sovereign-firstboot.service
+
+    # Give sovereign user sudo without password (needed for install)
+    - |
+      echo "sovereign ALL=(ALL) NOPASSWD:ALL" > /target/etc/sudoers.d/sovereign
+      chmod 440 /target/etc/sudoers.d/sovereign
+
+  # ===========================================================================
+  # SECTION 7 -- USER DATA
+  # ===========================================================================
+  user-data:
+    users:
+      - name: sovereign
+        groups: [sudo, adm]
+        shell: /bin/bash
+        lock_passwd: false
+        # Same password hash as identity section above
+        passwd: "$6$rounds=4096$saltsaltsaltsalt$pBOvxFkZuBxuGGBTJJHnvQ5JjmkSBv7w6mPUHIb1FiGWwcvqHkJhx4u9dX.Yw8zHBm0JyVKjm3QlUcDvSe1"
+
+  # Suppress interactive prompts
+  interactive-sections: []
