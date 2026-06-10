@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sovereign OS — Setup Guide v4</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: Arial, sans-serif; font-size: 13px; line-height: 1.6; color: #1a1a1a; background: #fff; max-width: 920px; margin: 0 auto; padding: 32px; }
+  h1 { font-size: 24px; font-weight: bold; margin-bottom: 4px; }
+  .subtitle { font-size: 12px; color: #555; margin-bottom: 32px; padding-bottom: 12px; border-bottom: 3px solid #1a5276; }
+  h2 { font-size: 15px; font-weight: bold; margin: 28px 0 10px; padding: 6px 10px; background: #1a5276; color: #fff; border-radius: 3px; }
+  h3 { font-size: 13px; font-weight: bold; margin: 16px 0 6px; color: #1a5276; }
+  p { margin-bottom: 10px; }
+  ul, ol { margin: 6px 0 12px 20px; }
+  li { margin-bottom: 4px; }
+  code { background: #f0f0f0; padding: 1px 5px; border-radius: 3px; font-family: 'Courier New', monospace; font-size: 11px; }
+  pre { background: #1e1e1e; color: #d4d4d4; padding: 14px 16px; border-radius: 5px; margin: 8px 0 14px; overflow-x: auto; font-family: 'Courier New', monospace; font-size: 11.5px; line-height: 1.7; }
+  table { width: 100%; border-collapse: collapse; margin: 10px 0 18px; font-size: 12px; }
+  th { background: #1a5276; color: #fff; padding: 7px 10px; text-align: left; }
+  td { padding: 6px 10px; border-bottom: 1px solid #e0e0e0; vertical-align: top; }
+  tr:nth-child(even) { background: #f8f9fa; }
+  .ok { color: #1a7a3a; font-weight: bold; }
+  .warn { color: #b7770d; font-weight: bold; }
+  .pending { color: #888; }
+  .badge { display: inline-block; padding: 1px 7px; border-radius: 3px; font-size: 10px; font-weight: bold; margin-left: 6px; }
+  .new { background: #cce5ff; color: #004085; }
+  .fixed { background: #d4edda; color: #155724; }
+  .todo { background: #fff3cd; color: #856404; }
+  .warning-box { background: #fff3cd; border-left: 4px solid #ffc107; padding: 10px 14px; margin: 10px 0; border-radius: 0 4px 4px 0; }
+  .info-box { background: #d1ecf1; border-left: 4px solid #17a2b8; padding: 10px 14px; margin: 10px 0; border-radius: 0 4px 4px 0; }
+  .sovereignty-box { background: #d4edda; border-left: 4px solid #28a745; padding: 10px 14px; margin: 10px 0; border-radius: 0 4px 4px 0; }
+  @media print { body { padding: 16px; } pre { font-size: 10px; } }
+</style>
+</head>
+<body>
+
+<h1>Sovereign OS — Setup &amp; Operations Guide</h1>
+<div class="subtitle">
+  Dell OptiPlex 3020 SFF &nbsp;|&nbsp; Ubuntu Server 22.04.5 LTS &nbsp;|&nbsp;
+  Version 4.0 &nbsp;|&nbsp; June 2026 &nbsp;|&nbsp;
+  IP: 192.168.1.100 &nbsp;|&nbsp; Host: sovereign-server
+</div>
+
+<!-- SOVEREIGNTY STATEMENT -->
+<h2>Sovereignty Guarantee</h2>
+<div class="sovereignty-box">
+  <strong>All AI inference happens on-device.</strong> Ollama (UID 998) is blocked at the kernel level from making any outbound HTTP or HTTPS connections via iptables owner-match rules. Models cannot phone home, send telemetry, or exfiltrate data. The only intentional outbound traffic is SearXNG fetching web search results when a user explicitly enables web search, and n8n calling external APIs only when a user explicitly configures a workflow to do so.
+</div>
+
+<h3>Verify sovereignty at any time</h3>
+<pre># Confirm Ollama outbound is blocked
+sudo iptables -L OUTPUT | grep ollama
+# Expected: DROP rules for UID 998 on ports 80 and 443
+
+# Confirm no AI service has active external connections
+sudo ss -tnp | grep -E "ollama|n8n|chroma|searx" | grep -v 127.0.0.1
+# Expected: empty output</pre>
+
+<!-- STACK STATUS -->
+<h2>Complete Stack Status — June 2026</h2>
+<table>
+  <tr><th>Component</th><th>Version</th><th>Port</th><th>Status</th><th>Managed by</th></tr>
+  <tr><td>Ubuntu Server</td><td>22.04.5 LTS</td><td>-</td><td class="ok">✅ Running</td><td>-</td></tr>
+  <tr><td>Ollama</td><td>Latest</td><td>11434</td><td class="ok">✅ Running</td><td>systemd</td></tr>
+  <tr><td>Mistral 7B Q4_K_M</td><td>-</td><td>-</td><td class="ok">✅ Loaded</td><td>Ollama</td></tr>
+  <tr><td>Qwen 2.5 7B</td><td>-</td><td>-</td><td class="ok">✅ Loaded</td><td>Ollama</td></tr>
+  <tr><td>Qwen 2.5 3B</td><td>-</td><td>-</td><td class="ok">✅ Loaded</td><td>Ollama</td></tr>
+  <tr><td>Whisper base + medium</td><td>-</td><td>-</td><td class="ok">✅ Installed</td><td>-</td></tr>
+  <tr><td>Piper TTS</td><td>-</td><td>-</td><td class="ok">✅ Installed</td><td>-</td></tr>
+  <tr><td>Open WebUI</td><td>0.9.6</td><td>443</td><td class="ok">✅ Running</td><td>systemd + nginx</td></tr>
+  <tr><td>ChromaDB</td><td>1.5.2</td><td>8000</td><td class="ok">✅ Running</td><td>systemd</td></tr>
+  <tr><td>n8n</td><td>2.23.4</td><td>5678</td><td class="ok">✅ Running</td><td>PM2 + systemd</td></tr>
+  <tr><td>SearXNG</td><td>2026.6.7</td><td>8888</td><td class="ok">✅ Running</td><td>systemd</td></tr>
+  <tr><td>Node.js</td><td>22.22.3</td><td>-</td><td class="ok">✅ Installed</td><td>-</td></tr>
+  <tr><td>GPU</td><td>-</td><td>-</td><td class="pending">⏳ Pending</td><td>-</td></tr>
+  <tr><td>SDXL image gen</td><td>-</td><td>-</td><td class="pending">⏳ Needs GPU</td><td>-</td></tr>
+</table>
+
+<!-- SERVICE URLS -->
+<h2>Service Access</h2>
+<table>
+  <tr><th>Service</th><th>URL</th><th>Notes</th></tr>
+  <tr><td>Open WebUI (AI chat)</td><td><strong>https://192.168.1.100</strong></td><td>Accept self-signed cert warning in browser</td></tr>
+  <tr><td>n8n (automation)</td><td><strong>http://192.168.1.100:5678</strong></td><td>LAN only — requires login</td></tr>
+  <tr><td>SearXNG (search)</td><td><strong>http://192.168.1.100:8888</strong></td><td>LAN only — no auth required</td></tr>
+  <tr><td>Ollama API</td><td><strong>http://192.168.1.100:11434</strong></td><td>LAN only — for API integrations</td></tr>
+  <tr><td>ChromaDB API</td><td>http://localhost:8000</td><td>Localhost only — use /api/v2/ endpoints</td></tr>
+</table>
+
+<!-- HARDWARE -->
+<h2>Hardware</h2>
+<table>
+  <tr><th>Component</th><th>Spec</th><th>Notes</th></tr>
+  <tr><td>Machine</td><td>Dell OptiPlex 3020 SFF</td><td>-</td></tr>
+  <tr><td>CPU</td><td>Intel i5-4570 (4 cores, 3.2GHz)</td><td>~4.2 tok/s CPU inference</td></tr>
+  <tr><td>RAM</td><td>2x8GB DDR3 = 16GB dual-channel</td><td>1333 MT/s confirmed</td></tr>
+  <tr><td>Storage</td><td>120GB SSD</td><td>~46GB free after full stack</td></tr>
+  <tr><td>Swap</td><td>8GB swapfile</td><td>/swapfile, persistent via fstab</td></tr>
+  <tr><td>GPU</td><td>None — PCIe x16 empty</td><td>GTX 1050 Ti 4GB recommended (£52)</td></tr>
+  <tr><td>Network</td><td>192.168.1.100 (enp2s0)</td><td>Gateway: 192.168.1.254</td></tr>
+</table>
+
+<!-- FIREWALL -->
+<h2>Firewall — Hardened Ruleset <span class="badge fixed">Hardened June 2026</span></h2>
+<div class="info-box">All stale rules removed. Ports 8080 and legacy 11434 (open to Anywhere) deleted. Final ruleset is clean and LAN-restricted where appropriate.</div>
+<table>
+  <tr><th>Rule</th><th>Port</th><th>Access</th><th>Service</th></tr>
+  <tr><td>1</td><td>22/tcp</td><td>Anywhere</td><td>SSH</td></tr>
+  <tr><td>2</td><td>443/tcp</td><td>Anywhere</td><td>Open WebUI HTTPS</td></tr>
+  <tr><td>3</td><td>3000</td><td>LAN only (192.168.1.0/24)</td><td>Open WebUI HTTP</td></tr>
+  <tr><td>4</td><td>11434</td><td>LAN only</td><td>Ollama API</td></tr>
+  <tr><td>5</td><td>5678</td><td>LAN only</td><td>n8n</td></tr>
+  <tr><td>6</td><td>8888</td><td>LAN only</td><td>SearXNG</td></tr>
+  <tr><td>7</td><td>22/tcp (v6)</td><td>Anywhere</td><td>SSH IPv6</td></tr>
+  <tr><td>8</td><td>443/tcp (v6)</td><td>Anywhere</td><td>HTTPS IPv6</td></tr>
+</table>
+
+<!-- INSTALL SCRIPT -->
+<h2>install.sh v2.0 <span class="badge new">Tested June 2026</span></h2>
+<p>Full repeatable install script. Tested on the live OptiPlex. All stages are idempotent — safe to re-run, already-completed stages skip automatically.</p>
+
+<h3>Configuration flags (top of script)</h3>
+<pre>INSTALL_N8N=true        # Install n8n workflow automation
+INSTALL_SEARXNG=true    # Install SearXNG local web search
+INSTALL_HTTPS=false     # Run separately after base stack confirmed working</pre>
+
+<h3>Stages</h3>
+<table>
+  <tr><th>Stage</th><th>Name</th><th>Notes</th></tr>
+  <tr><td>0</td><td>Preflight</td><td>RAM detection, tier assignment (A/B/C/D), directory structure</td></tr>
+  <tr><td>1</td><td>Base packages</td><td>apt install including python3.11, build tools, zstd</td></tr>
+  <tr><td>2</td><td>Security</td><td>UFW rules, kernel tuning, disable noise services</td></tr>
+  <tr><td>3</td><td>Storage</td><td>Second disk detection and mount if present</td></tr>
+  <tr><td>4</td><td>Ollama</td><td>Install from USB binary, block outbound via iptables</td></tr>
+  <tr><td>5</td><td>Models</td><td>Copy GGUF/Whisper/Piper from USB, register with Ollama</td></tr>
+  <tr><td>6</td><td>Open WebUI</td><td>Extract venv.tar.gz (offline) or install via uv (first machine)</td></tr>
+  <tr><td>7</td><td>ChromaDB</td><td>Detect from venv (no install if venv.tar.gz used)</td></tr>
+  <tr><td>8</td><td>LAN discovery</td><td>avahi-daemon, access_info.txt, login banner</td></tr>
+  <tr><td>9</td><td>Verify</td><td>Service health checks, sovereignty confirmation</td></tr>
+  <tr><td>10</td><td>n8n (optional)</td><td>Node.js 22, PM2, ecosystem.config.js</td></tr>
+  <tr><td>11</td><td>SearXNG (optional)</td><td>Python 3.11 venv, all known fixes baked in</td></tr>
+  <tr><td>12</td><td>HTTPS (optional)</td><td>nginx + self-signed cert — run after base confirmed</td></tr>
+</table>
+
+<h3>Known script fixes (baked into v2.0)</h3>
+<table>
+  <tr><th>Issue</th><th>Fix</th></tr>
+  <tr><td>PM2 startup grep returning empty crashed script under set -euo pipefail</td><td>Added || true guards throughout PM2 section</td></tr>
+  <tr><td>n8n reinstalled every run even when already present</td><td>Check command -v n8n before running npm install</td></tr>
+  <tr><td>SearXNG git clone failed if source directory existed</td><td>Check for existing source dir before clone</td></tr>
+  <tr><td>SearXNG venv rebuilt every run</td><td>Check for existing venv binary before building</td></tr>
+  <tr><td>Open WebUI health check used wrong port (3000 vs 443)</td><td>Check both port 3000 and https://localhost</td></tr>
+  <tr><td>Sovereignty check grep didn't match iptables output format</td><td>grep for "ollama|uid-owner" instead of UID number</td></tr>
+</table>
+
+<!-- USB -->
+<h2>USB Drive — Deployment Package <span class="badge fixed">Updated June 2026</span></h2>
+<div class="info-box">USB is fully populated and ready for clean deploy on a second machine. venv.tar.gz includes ChromaDB 1.5.2. All new components have offline packages.</div>
+
+<h3>USB contents</h3>
+<table>
+  <tr><th>Path</th><th>Contents</th><th>Size</th></tr>
+  <tr><td>binaries/</td><td>Ollama amd64+arm64, uv</td><td>~2.7GB</td></tr>
+  <tr><td>models/gguf/</td><td>Mistral 7B, Qwen 7B, Qwen 3B</td><td>~10.2GB</td></tr>
+  <tr><td>models/sdxl/</td><td>SDXL base 1.0 (needs 6GB+ VRAM)</td><td>6.5GB</td></tr>
+  <tr><td>models/whisper/</td><td>base + medium</td><td>1.6GB</td></tr>
+  <tr><td>models/piper/</td><td>en_US lessac medium voice</td><td>61MB</td></tr>
+  <tr><td>packages/venv.tar.gz</td><td>Complete Python venv incl. Open WebUI + ChromaDB 1.5.2</td><td>3.2GB</td></tr>
+  <tr><td>packages/pip/</td><td>Open WebUI wheel</td><td>~330MB</td></tr>
+  <tr><td>packages/npm/</td><td>n8n 2.23.4 + PM2 5.4.3 tarballs</td><td>~150MB</td></tr>
+  <tr><td>packages/searxng/</td><td>SearXNG master zip</td><td>~15MB</td></tr>
+  <tr><td>packages/deb/</td><td>NodeSource setup script</td><td>minimal</td></tr>
+  <tr><td>install.sh</td><td>v2.0 install script (tested)</td><td>-</td></tr>
+  <tr><td>populate.ps1</td><td>v2.0 Windows download script</td><td>-</td></tr>
+</table>
+
+<h3>Offline capability</h3>
+<table>
+  <tr><th>Component</th><th>Offline?</th><th>Notes</th></tr>
+  <tr><td>Ollama + models</td><td class="ok">✅ Fully offline</td><td>Binary + GGUF on USB</td></tr>
+  <tr><td>Open WebUI</td><td class="ok">✅ Fully offline</td><td>Extracted from venv.tar.gz</td></tr>
+  <tr><td>ChromaDB</td><td class="ok">✅ Fully offline</td><td>Included in venv.tar.gz (repacked June 2026)</td></tr>
+  <tr><td>n8n</td><td class="warn">⚠️ Partial</td><td>npm tarballs on USB but deps need internet on first install</td></tr>
+  <tr><td>SearXNG</td><td class="warn">⚠️ Partial</td><td>Source zip on USB but pip deps need internet on first install</td></tr>
+  <tr><td>Whisper/Piper</td><td class="ok">✅ Fully offline</td><td>Models on USB</td></tr>
+</table>
+
+<!-- N8N -->
+<h2>n8n Installation</h2>
+<p>Workflow automation platform (Fair Code, German company). Enables connecting AI models to external services and building local automation pipelines.</p>
+
+<h3>Key config — /opt/n8n/ecosystem.config.js</h3>
+<pre>module.exports = {
+  apps: [{
+    name: 'n8n',
+    script: 'n8n',
+    interpreter: 'none',
+    env: {
+      N8N_USER_FOLDER: '/opt/n8n',
+      N8N_PORT: '5678',
+      N8N_HOST: '0.0.0.0',
+      N8N_SECURE_COOKIE: 'false',
+      N8N_PROTOCOL: 'http',
+      N8N_DIAGNOSTICS_ENABLED: 'false',
+      N8N_VERSION_NOTIFICATIONS_ENABLED: 'false',
+      N8N_TEMPLATES_ENABLED: 'false',
+      N8N_HIDE_USAGE_PAGE: 'true',
+      EXECUTIONS_DATA_PRUNE: 'true',
+      EXECUTIONS_DATA_MAX_AGE: '336'
+    }
+  }]
+}</pre>
+
+<h3>Management</h3>
+<pre>pm2 status              # Check running
+pm2 logs n8n            # View logs
+pm2 restart n8n         # Restart
+pm2 delete n8n          # Remove (re-add with ecosystem config)</pre>
+
+<h3>Known issues</h3>
+<table>
+  <tr><th>Issue</th><th>Fix</th></tr>
+  <tr><td>Secure cookie browser error</td><td>Use ecosystem.config.js — inline env vars don't persist in PM2</td></tr>
+  <tr><td>Activation key screen on first launch</td><td>Register with disposable email — telemetry disabled via env vars</td></tr>
+  <tr><td>npm ERESOLVE peer dependency warnings</td><td>Warnings only, not errors — install completes fine</td></tr>
+</table>
+
+<!-- SEARXNG -->
+<h2>SearXNG Installation</h2>
+<p>Privacy-respecting metasearch engine. Provides live web search for Open WebUI without routing queries through Google or Bing APIs.</p>
+
+<div class="warning-box"><strong>Python 3.11 required.</strong> Ubuntu 22.04 ships Python 3.10 which lacks tomllib and has SQLite threading issues. Must use Python 3.11 venv explicitly.</div>
+
+<h3>Critical settings in /etc/searxng/settings.yml</h3>
+<pre># bind_address and port MUST be separate keys (combined format fails schema)
+bind_address: "0.0.0.0"
+port: 8888
+
+# limiter must be false (no Valkey/Redis)
+limiter: false
+
+# valkey url must be empty string (commenting out fails schema validation)
+valkey:
+  url: ""
+
+# JSON format required for Open WebUI
+formats:
+  - json
+  - html</pre>
+
+<h3>Wire into Open WebUI</h3>
+<p>Admin Panel → Settings → Web Search → enable Web Search → Engine: SearXNG → URL: <code>http://192.168.1.100:8888</code></p>
+<p>Enable per-chat by clicking the globe icon in the message input bar.</p>
+
+<h3>Known issues</h3>
+<table>
+  <tr><th>Issue</th><th>Cause</th><th>Fix</th></tr>
+  <tr><td>ModuleNotFoundError: tomllib</td><td>Python 3.10 built-in</td><td>Use Python 3.11 venv</td></tr>
+  <tr><td>SQLite threading error</td><td>Ubuntu 22.04 SQLite compiled wrong for 3.10</td><td>Use Python 3.11</td></tr>
+  <tr><td>"Name or service not known" crash</td><td>Valkey URL resolved at startup</td><td>Set valkey url: "" (empty string)</td></tr>
+  <tr><td>bind_address "0.0.0.0:8888" fails</td><td>Schema expects IP and port separately</td><td>Use separate bind_address and port keys</td></tr>
+  <tr><td>JSON not working in Open WebUI</td><td>Default config only enables HTML</td><td>Add json to formats list</td></tr>
+</table>
+
+<!-- CHROMADB -->
+<h2>ChromaDB — RAG Vector Database</h2>
+<div class="info-box"><strong>Pre-installed in sovereign venv.</strong> ChromaDB 1.5.2 is included in venv.tar.gz on the USB — no internet required on fresh deploy.</div>
+<table>
+  <tr><th>Item</th><th>Value</th></tr>
+  <tr><td>Version</td><td>1.5.2 (includes Rust bindings)</td></tr>
+  <tr><td>Binary</td><td>/opt/sovereign/venv/bin/chroma</td></tr>
+  <tr><td>Data</td><td>/var/lib/sovereign/chromadb</td></tr>
+  <tr><td>Systemd unit</td><td>chromadb.service (enabled)</td></tr>
+  <tr><td>Port</td><td>8000 (localhost only)</td></tr>
+  <tr><td>API version</td><td>v2 — use /api/v2/heartbeat</td></tr>
+</table>
+<pre>curl http://localhost:8000/api/v2/heartbeat
+# Expected: {"nanosecond heartbeat": ...}</pre>
+
+<!-- OPERATIONS -->
+<h2>Daily Operations</h2>
+
+<h3>Check all services</h3>
+<pre>systemctl status ollama open-webui chromadb searxng nginx --no-pager
+pm2 status</pre>
+
+<h3>View logs</h3>
+<pre>sudo journalctl -u ollama -n 50 --no-pager
+sudo journalctl -u searxng -n 50 --no-pager
+sudo journalctl -u chromadb -n 50 --no-pager
+pm2 logs n8n --lines 50</pre>
+
+<h3>Restart services</h3>
+<pre>sudo systemctl restart ollama
+sudo systemctl restart open-webui
+sudo systemctl restart chromadb
+sudo systemctl restart searxng
+pm2 restart n8n</pre>
+
+<h3>Performance check</h3>
+<pre>ollama run qwen2.5:7b --verbose
+# Expect ~4.2 tok/s on i5-4570 CPU only
+# Will improve after GPU install</pre>
+
+<!-- PENDING -->
+<h2>Pending Tasks</h2>
+<table>
+  <tr><th>Task</th><th>Priority</th><th>Notes</th></tr>
+  <tr><td>GPU: GTX 1050 Ti 4GB</td><td class="warn">High</td><td>£52 CEX/eBay UK. Unlocks full 7B GPU offload (~25 tok/s). Install before clean reinstall.</td></tr>
+  <tr><td>Clean reinstall on OptiPlex</td><td class="warn">High</td><td>USB is ready. Boot from USB, run install.sh v2.0. Wipe and start fresh.</td></tr>
+  <tr><td>n8n/SearXNG true offline</td><td class="pending">Medium</td><td>npm and pip deps still need internet on first install. Future: pre-cache deps on USB.</td></tr>
+  <tr><td>SDXL image generation</td><td class="pending">Low</td><td>Requires 6GB+ VRAM — GTX 1050 Ti (4GB) is not enough. Needs RX 6600 or better.</td></tr>
+  <tr><td>User monitoring dashboard</td><td class="pending">Future</td><td>Per-user query volume, model usage, login history for institutional reporting.</td></tr>
+  <tr><td>install.sh v2 — n8n/SearXNG true offline</td><td class="pending">Future</td><td>Pre-cache all pip/npm deps on USB to eliminate internet dependency for these stages.</td></tr>
+</table>
+
+<!-- TROUBLESHOOTING -->
+<h2>Troubleshooting</h2>
+
+<h3>n8n not accessible</h3>
+<pre>pm2 status
+pm2 logs n8n --lines 30
+curl http://localhost:5678
+sudo ufw status | grep 5678</pre>
+
+<h3>SearXNG not responding</h3>
+<pre>sudo systemctl status searxng
+sudo journalctl -u searxng -n 30 --no-pager
+curl "http://localhost:8888/search?q=test&format=json"</pre>
+
+<h3>Ollama model not responding</h3>
+<pre>systemctl status ollama
+ollama list
+ollama run mistral-7b --verbose</pre>
+
+<h3>Open WebUI not loading</h3>
+<pre>systemctl status open-webui
+systemctl status nginx
+curl -sk https://localhost | head -5</pre>
+
+<h3>Out of disk space</h3>
+<pre>df -h
+du -sh /usr/share/ollama/.ollama/models/*</pre>
+
+</body>
+</html>
