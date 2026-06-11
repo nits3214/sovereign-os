@@ -313,6 +313,9 @@ stage_security() {
     ufw allow from "$LAN_SUBNET" to any port "$OLLAMA_PORT" comment "Ollama LAN"
     ufw allow from "$LAN_SUBNET" to any port "$N8N_PORT" comment "n8n LAN"
     ufw allow from "$LAN_SUBNET" to any port "$SEARXNG_PORT" comment "SearXNG LAN"
+    ufw allow in on tailscale0 to any port "$WEBUI_PORT" comment "Open WebUI Tailscale"
+    ufw allow in on tailscale0 to any port "$SEARXNG_PORT" comment "SearXNG Tailscale"
+    ufw allow in on tailscale0 to any port "$N8N_PORT" comment "n8n Tailscale"
 
     ufw --force enable
     log_ok "UFW configured"
@@ -552,7 +555,10 @@ stage_models() {
         D)     MODELS_TO_INSTALL=("$MODEL_SMALL") ;;
     esac
 
-    for model in "${MODELS_TO_INSTALL[@]}"; do
+    chown -R ollama:ollama "$MODELS_DIR"
+    chmod -R 755 "$MODELS_DIR"
+
+for model in "${MODELS_TO_INSTALL[@]}"; do
         src="$USB_SOURCE/models/gguf/$model"
         dst="$MODELS_DIR/gguf/$model"
         if [[ -f "$dst" ]]; then
