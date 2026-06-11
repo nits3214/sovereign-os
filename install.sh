@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Sovereign OS -- install.sh v2.1
+# Sovereign OS -- install.sh v2.2
 # Installs the full AI stack from USB assets onto a fresh Ubuntu 22.04 machine.
 #
 # USAGE:
@@ -17,12 +17,25 @@
 #   If packages/venv.tar.gz exists on USB: fully offline install
 #   If not: internet required for first machine only, then USB is updated
 #
-# CHANGELOG v2.1 (June 2026):
-#   + Stage 0a: auto-detect USB by CIDATA label, mount and copy to SSD
-#   + USB_SOURCE set dynamically to /opt/sovereign/usb-assets (not hardcoded)
-#   + INSTALL_HTTPS now true by default (nginx required for mic/WebRTC)
-#   + Node.js: falls back to internet gracefully if tarball absent
-#   + All v2.0 fixes retained
+# CHANGELOG v2.2 (June 2026):
+#   + Stage 0a: fallback check for assets at /opt/sovereign (copied by
+#               user-data v2.1 and earlier -- handles both path layouts)
+#   + Stage 1:  sqlite3 and unzip added to base packages
+#   + Stage 4:  iptables sovereignty rules inserted at OUTPUT position 1
+#               (must fire BEFORE UFW chains -- critical fix from live testing)
+#   + Stage 4:  Sovereignty verification test runs post-install
+#   + Stage 5:  nomic-embed-text registered from USB blobs + manifest
+#   + Stage 5:  All model num_ctx values set explicitly (no silent defaults)
+#               7B: 16384, 3B: 8192
+#   + Stage 6:  ExecStart uses --port CLI flag (ENV PORT ignored in v0.9.6)
+#   + Stage 6:  Open WebUI config patched post-start via sqlite3 Python script
+#               (fixes RAG embedding model, SearXNG URL, bypass flags)
+#   + All v2.1 fixes retained
+#
+# COMPANION FILES (update together):
+#   user-data v2.2  -- late-commands path + LVM extend + snap removal
+#   populate.ps1 v2.1 -- nomic blob verification
+#   verify_usb.ps1 v2.1 -- nomic blob checks
 # =============================================================================
 
 # =============================================================================
@@ -86,10 +99,20 @@ is_done()   { grep -qx "$1" "$STATE_FILE" 2>/dev/null; }
 stage_usb_copy() {
     log_section "Stage 0a -- USB Detection and Asset Copy"
 
-    # If assets already on SSD (re-run scenario), skip copy
+    # Check 1: assets already at canonical ASSETS_DIR (re-run scenario)
     if [[ -d "$ASSETS_DIR/binaries" ]] && [[ -d "$ASSETS_DIR/models" ]]; then
         log_ok "Assets already on SSD at $ASSETS_DIR -- skipping copy"
         USB_SOURCE="$ASSETS_DIR"
+        return
+    fi
+
+    # Check 2: autoinstall late-commands copied assets to /opt/sovereign directly
+    # (user-data v2.1 and earlier used this path before v2.2 fixed it)
+    # Safe fallback -- use in place without copying again
+    if [[ -d "/opt/sovereign/binaries" ]] && [[ -d "/opt/sovereign/models" ]]; then
+        log_ok "Assets found at /opt/sovereign (copied by autoinstall) -- using in place"
+        USB_SOURCE="/opt/sovereign"
+        ASSETS_DIR="/opt/sovereign"
         return
     fi
 
@@ -124,25 +147,25 @@ stage_usb_copy() {
     local usb_mount="/mnt/sovereign-usb"
     mkdir -p "$usb_mount"
 
-	if mountpoint -q "$usb_mount"; then
-			log_info "Already mounted at $usb_mount"
-		else
-			# Check if already mounted elsewhere and bind if so
-			existing=$(findmnt -n -o TARGET --source "$usb_dev" 2>/dev/null | head -1)
-			if [[ -n "$existing" ]]; then
-				mount --bind "$existing" "$usb_mount" 2>&1 | tee -a "$LOG_FILE" || {
-					log_error "Failed to bind mount $usb_dev from $existing"
-					exit 1
-				}
-				log_ok "Bind mounted from $existing to $usb_mount"
-			else
-				mount -o ro "$usb_dev" "$usb_mount" 2>&1 | tee -a "$LOG_FILE" || {
-					log_error "Failed to mount $usb_dev at $usb_mount"
-					exit 1
-				}
-				log_ok "Mounted $usb_dev at $usb_mount (read-only)"
-			fi
-		fi
+    if mountpoint -q "$usb_mount"; then
+        log_info "Already mounted at $usb_mount"
+    else
+        # Check if already mounted elsewhere and bind if so
+        existing=$(findmnt -n -o TARGET --source "$usb_dev" 2>/dev/null | head -1)
+        if [[ -n "$existing" ]]; then
+            mount --bind "$existing" "$usb_mount" 2>&1 | tee -a "$LOG_FILE" || {
+                log_error "Failed to bind mount $usb_dev from $existing"
+                exit 1
+            }
+            log_ok "Bind mounted from $existing to $usb_mount"
+        else
+            mount -o ro "$usb_dev" "$usb_mount" 2>&1 | tee -a "$LOG_FILE" || {
+                log_error "Failed to mount $usb_dev at $usb_mount"
+                exit 1
+            }
+            log_ok "Mounted $usb_dev at $usb_mount (read-only)"
+        fi
+    fi
 
     # Verify sovereign folder exists on USB
     if [[ ! -d "$usb_mount/sovereign" ]]; then
@@ -256,6 +279,8 @@ stage_packages() {
         avahi-daemon \
         ufw \
         iptables-persistent \
+        sqlite3 \
+        unzip \
         htop \
         zstd \
         openssl \
@@ -364,6 +389,10 @@ stage_disk() {
 
 # =============================================================================
 # STAGE 4 -- OLLAMA
+# CRITICAL: iptables sovereignty rules MUST be inserted at OUTPUT position 1
+# to fire BEFORE UFW chains. Appending with -A puts them after UFW and they
+# never fire. Verified on i5-4570 Ubuntu 22.04 in live testing June 2026.
+# Sovereignty test must be run after every install.
 # =============================================================================
 stage_ollama() {
     is_done "ollama" && { log_info "Ollama already installed, skipping"; return; }
@@ -397,14 +426,44 @@ stage_ollama() {
 
     id ollama &>/dev/null || useradd -r -s /bin/false -m -d /usr/share/ollama ollama
 
-    # Block Ollama outbound (sovereignty guarantee)
-    log_info "Blocking Ollama outbound traffic..."
+    # ------------------------------------------------------------------
+    # SOVEREIGNTY BLOCK -- iptables rules MUST be at OUTPUT position 1
+    # Inserting with -I OUTPUT 1 puts them before UFW's ufw-before-output
+    # chain. If you use -A they go after UFW and never fire. This was
+    # identified as a critical sovereignty breach in live testing.
+    # ------------------------------------------------------------------
+    log_info "Applying sovereignty iptables rules (OUTPUT position 1)..."
     OLLAMA_UID=$(id -u ollama)
-    iptables -A OUTPUT -m owner --uid-owner "$OLLAMA_UID" -p tcp --dport 443 -j DROP
-    iptables -A OUTPUT -m owner --uid-owner "$OLLAMA_UID" -p tcp --dport 80 -j DROP
+
+    # Flush any existing ollama rules first to avoid duplicates on re-run
+    iptables -D OUTPUT -m owner --uid-owner "$OLLAMA_UID" -p tcp --dport 443 -j DROP \
+        2>/dev/null || true
+    iptables -D OUTPUT -m owner --uid-owner "$OLLAMA_UID" -p tcp --dport 80 -j DROP \
+        2>/dev/null || true
+
+    # Insert at position 1 -- fires before UFW chains
+    iptables -I OUTPUT 1 -m owner --uid-owner "$OLLAMA_UID" -p tcp --dport 443 -j DROP
+    iptables -I OUTPUT 1 -m owner --uid-owner "$OLLAMA_UID" -p tcp --dport 80 -j DROP
+
+    # Persist rules
     netfilter-persistent save 2>&1 | tee -a "$LOG_FILE" || \
         iptables-save > /etc/iptables/rules.v4
-    log_ok "Ollama outbound blocked"
+
+    log_ok "Sovereignty rules applied at OUTPUT positions 1 and 2"
+
+    # Verify rules are in correct position
+    log_info "Verifying sovereignty rule positions..."
+	RULE_POS_443=$(sudo iptables -L OUTPUT --line-numbers 2>/dev/null | \
+	    grep "uid-owner $OLLAMA_UID" | grep "dpt:443" | awk '{print $1}' | head -1) || true
+	RULE_POS_80=$(sudo iptables -L OUTPUT --line-numbers 2>/dev/null | \
+	    grep "uid-owner $OLLAMA_UID" | grep "dpt:80" | awk '{print $1}' | head -1) || true
+
+    if [[ -n "$RULE_POS_443" ]] && [[ -n "$RULE_POS_80" ]] && [[ "$RULE_POS_443" -le 2 ]] && [[ "$RULE_POS_80" -le 2 ]]; then
+        log_ok "Sovereignty rules confirmed at positions $RULE_POS_80 and $RULE_POS_443"
+    else
+        log_warn "Sovereignty rules may not be in correct position -- verify manually"
+        log_warn "Run: sudo sudo iptables -L OUTPUT --line-numbers"
+    fi
 
     # Fix permissions before starting service
     mkdir -p "$MODELS_DIR"
@@ -441,12 +500,41 @@ EOF
     done
     log_ok "Ollama running"
 
+    # ------------------------------------------------------------------
+    # SOVEREIGNTY VERIFICATION TEST
+    # This MUST pass. A passing result means "BLOCKED" not "BREACH".
+    # If it prints BREACH the iptables rules are not in the right position.
+    # ------------------------------------------------------------------
+    log_info "Running sovereignty verification test..."
+    sudo -u ollama curl -s --max-time 5 https://ollama.com > /dev/null 2>&1 \
+    	&& SOVEREIGNTY_RESULT="BREACH" || SOVEREIGNTY_RESULT="BLOCKED"
+
+
+    if [[ "$SOVEREIGNTY_RESULT" == "BLOCKED" ]]; then
+        log_ok "SOVEREIGNTY VERIFIED -- Ollama cannot reach internet"
+    else
+        log_error "SOVEREIGNTY BREACH -- Ollama CAN reach internet"
+        log_error "Check iptables rule positions: sudo sudo iptables -L OUTPUT --line-numbers"
+        log_error "Rules must be at positions 1 and 2, before UFW chains"
+        # Do not exit -- log the breach and continue so install completes
+        # Operator must fix manually
+        echo "SOVEREIGNTY_BREACH=true" >> /etc/sovereign/hw.conf
+    fi
+
     mark_done "ollama"
     log_ok "Ollama stage complete"
 }
 
 # =============================================================================
 # STAGE 5 -- MODELS
+# Registers GGUF models with Ollama via Modelfile.
+# nomic-embed-text registered via blob+manifest copy (no Modelfile needed).
+# num_ctx values set explicitly -- never rely on model defaults.
+#
+# num_ctx rationale (tested on i5-4570 16GB RAM):
+#   7B models: 16384 -- required for web search context injection
+#   3B models: 8192  -- safe maximum for 16GB RAM
+#   nomic-embed-text: 8192 -- default from upstream, retained
 # =============================================================================
 stage_models() {
     is_done "models" && { log_info "Models already installed, skipping"; return; }
@@ -489,23 +577,95 @@ stage_models() {
 
     chown -R ollama:ollama "$MODELS_DIR"
 
-    # Register models with Ollama
+    # Register GGUF models with Ollama via Modelfile
+    # num_ctx 16384 for 7B models, 8192 for 3B -- never use silent defaults
     for model in "${MODELS_TO_INSTALL[@]}"; do
         model_path="$MODELS_DIR/gguf/$model"
         model_name="${model%.*}"
         model_name="${model_name,,}"
+
+        # Set num_ctx based on model size
+        if echo "$model_name" | grep -qi "3b\|3B"; then
+            NUM_CTX=8192
+        else
+            NUM_CTX=16384
+        fi
+
         if [[ -f "$model_path" ]]; then
-            log_info "Registering with Ollama: $model_name"
+            log_info "Registering with Ollama: $model_name (num_ctx $NUM_CTX)"
             cat > /tmp/Modelfile << EOF
 FROM $model_path
 PARAMETER temperature 0.7
-PARAMETER num_ctx 4096
+PARAMETER num_ctx $NUM_CTX
 SYSTEM "You are a helpful AI assistant. Your responses are private and never leave this machine."
 EOF
             ollama create "$model_name" -f /tmp/Modelfile 2>&1 | \
                 tee -a "$LOG_FILE" || log_warn "Could not register $model_name"
+            log_ok "Registered: $model_name (num_ctx $NUM_CTX)"
         fi
     done
+
+    # ------------------------------------------------------------------
+    # REGISTER nomic-embed-text via blob + manifest copy
+    # This is the embedding model required for RAG and web search.
+    # Do NOT use 'ollama pull' -- this is an airgap install.
+    # Do NOT use a Modelfile -- the manifest already encodes all metadata.
+    # Blob SHAs are fixed for nomic-embed-text:latest as of June 2026.
+    # ------------------------------------------------------------------
+    log_info "Registering nomic-embed-text embedding model..."
+
+    NOMIC_BLOB_DIR="$USB_SOURCE/models/blobs"
+    NOMIC_MANIFEST_SRC="$USB_SOURCE/models/manifests/registry.ollama.ai/library/nomic-embed-text/latest"
+    NOMIC_MANIFEST_DST="$MODELS_DIR/manifests/registry.ollama.ai/library/nomic-embed-text"
+
+    NOMIC_BLOBS=(
+        "sha256-970aa74c0a90ef7482477cf803618e776e173c007bf957f635f1015bfcfef0e6"
+        "sha256-31df23ea7daa448f9ccdbbcecce6c14689c8552222b80defd3830707c0139d4f"
+        "sha256-c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+        "sha256-ce4a164fc04605703b485251fe9f1a181688ba0eb6badb80cc6335c0de17ca0d"
+    )
+
+    # Check all source blobs are present before copying anything
+    local nomic_ok=true
+    for blob in "${NOMIC_BLOBS[@]}"; do
+        if [[ ! -f "$NOMIC_BLOB_DIR/$blob" ]]; then
+            log_warn "nomic blob missing from USB: $blob"
+            nomic_ok=false
+        fi
+    done
+
+    if [[ ! -f "$NOMIC_MANIFEST_SRC" ]]; then
+        log_warn "nomic manifest missing from USB: $NOMIC_MANIFEST_SRC"
+        nomic_ok=false
+    fi
+
+    if [[ "$nomic_ok" == "true" ]]; then
+        # Copy blobs
+        for blob in "${NOMIC_BLOBS[@]}"; do
+            cp "$NOMIC_BLOB_DIR/$blob" "$MODELS_DIR/blobs/"
+            chown ollama:ollama "$MODELS_DIR/blobs/$blob"
+            log_ok "nomic blob: $blob"
+        done
+
+        # Copy manifest
+        mkdir -p "$NOMIC_MANIFEST_DST"
+        cp "$NOMIC_MANIFEST_SRC" "$NOMIC_MANIFEST_DST/latest"
+        chown -R ollama:ollama "$NOMIC_MANIFEST_DST"
+        log_ok "nomic manifest installed"
+
+        # Verify Ollama can see it
+        sleep 2
+        if ollama list 2>/dev/null | grep -q "nomic-embed-text"; then
+            log_ok "nomic-embed-text registered and visible to Ollama"
+        else
+            log_warn "nomic-embed-text not visible in ollama list -- verify manually"
+        fi
+    else
+        log_warn "nomic-embed-text skipped -- missing blobs or manifest on USB"
+        log_warn "Web search embedding will not work without nomic-embed-text"
+        log_warn "Add blobs to USB: sovereign/models/blobs/ and manifest to"
+        log_warn "sovereign/models/manifests/registry.ollama.ai/library/nomic-embed-text/"
+    fi
 
     mark_done "models"
     log_ok "Models stage complete"
@@ -515,6 +675,11 @@ EOF
 # STAGE 6 -- OPEN WEBUI
 # Path 1: venv.tar.gz on USB assets (true airgap -- machine 2+)
 # Path 2: uv from USB + internet (first machine only)
+#
+# IMPORTANT: After Open WebUI starts, this stage patches the SQLite config DB
+# to apply correct settings for CPU-only hardware. These settings cannot be
+# set via environment variables in v0.9.6 and must be written to the DB.
+# See patch_openwebui_config() for full rationale.
 # =============================================================================
 stage_openwebui() {
     is_done "openwebui" && { log_info "Open WebUI already installed, skipping"; return; }
@@ -585,6 +750,10 @@ stage_openwebui() {
 
     WEBUI_SECRET=$(openssl rand -hex 32)
 
+    # NOTE: ExecStart uses --port and --host CLI flags, NOT Environment PORT=
+    # Open WebUI v0.9.6 ignores the PORT environment variable in systemd.
+    # CLI flags are the only reliable way to set port and host. Verified in
+    # live testing June 2026.
     cat > /etc/systemd/system/open-webui.service << EOF
 [Unit]
 Description=Sovereign Open WebUI
@@ -607,6 +776,8 @@ Environment="DATA_DIR=${DATA_DIR}/openwebui"
 Environment="ENABLE_TELEMETRY=false"
 Environment="ENABLE_UPDATE_CHECK=false"
 Environment="DO_NOT_TRACK=true"
+Environment="ENABLE_IMAGE_GENERATION=false"
+Environment="ENABLE_COMMUNITY_SHARING=false"
 StandardOutput=journal
 StandardError=journal
 
@@ -620,15 +791,143 @@ EOF
     chown -R ${SOVEREIGN_USER}:${SOVEREIGN_USER} /opt/sovereign
     systemctl start open-webui
 
-    log_info "Waiting for Open WebUI to start..."
-    for i in $(seq 1 60); do
-        curl -s "http://localhost:${WEBUI_PORT}" &>/dev/null && break
+
+    log_info "Waiting for Open WebUI to start and initialise DB..."
+    local webui_ready=false
+    local db_path="${DATA_DIR}/openwebui/webui.db"
+    for i in $(seq 1 90); do
+        if curl -s "http://localhost:${WEBUI_PORT}" &>/dev/null && \
+           [[ -f "$db_path" ]]; then
+            webui_ready=true
+            break
+        fi
         sleep 3
     done
-    log_ok "Open WebUI running on port $WEBUI_PORT"
+    if [[ "$webui_ready" == "true" ]]; then
+        log_ok "Open WebUI running and DB initialised"
+        # Extra 10s for DB to finish writing initial config rows
+        sleep 10
+        patch_openwebui_config
+    else
+        log_warn "Open WebUI did not respond or DB not found -- skipping config patch"
+        log_warn "Run manually: python3 /opt/sovereign/usb-assets/config/patch_openwebui.py"
+    fi
+
 
     mark_done "openwebui"
     log_ok "Open WebUI stage complete"
+}
+
+# =============================================================================
+# patch_openwebui_config
+# Patches the Open WebUI SQLite config DB for CPU-only hardware.
+#
+# WHY THIS IS NEEDED:
+#   Open WebUI v0.9.6 stores runtime config in a JSON blob in SQLite.
+#   Several settings cannot be set via environment variables and must be
+#   written directly to the DB. The defaults are wrong for CPU-only hardware.
+#
+# WHAT IT FIXES:
+#   1. RAG_EMBEDDING_MODEL -- default is blank or wrong model; must be
+#      nomic-embed-text (the dedicated embedding model, not a chat LLM)
+#   2. searxng_query_url -- must include /search suffix; without it
+#      SearXNG returns HTML not JSON and web search silently fails
+#   3. bypass_embedding_and_retrieval (web search) -- must be True
+#      CPU embedding takes 30-40s per query; chat fires before embeddings
+#      complete, causing "No sources found". Bypass injects SearXNG
+#      snippets directly into context instead. Trade-off: no semantic
+#      ranking, but all snippets are relevant at 3-result count.
+#   4. bypass_web_loader -- must be True alongside bypass_embedding.
+#      Without this, full pages are fetched (thousands of tokens) and
+#      injected into context, overflowing the model's context window.
+#      With it, only the SearXNG snippet (~50 tokens) is used per result.
+#   5. enable_async_embedding -- True improves server responsiveness
+#      during background embedding operations
+#   6. result_count -- reduced to 3 (default 5 creates too much context)
+#   7. chunk_size / chunk_overlap -- 4000/200 reduces chunk count for
+#      knowledge base documents (fewer embedding calls per document)
+#   8. enable_markdown_header_text_splitter -- False reduces chunk count
+#
+# VERIFIED: These settings produce working web search on i5-4570 16GB RAM
+# with Qwen 2.5 7B Q4_K_M at num_ctx 16384. June 2026.
+# =============================================================================
+patch_openwebui_config() {
+    log_info "Patching Open WebUI config DB for CPU-only hardware..."
+
+    local db_path="${DATA_DIR}/openwebui/webui.db"
+
+    if [[ ! -f "$db_path" ]]; then
+        log_warn "webui.db not found at $db_path -- skipping config patch"
+        log_warn "Open WebUI may not have initialised yet"
+        return
+    fi
+
+    python3 << PYEOF
+import sqlite3, json, sys
+
+db_path = "${db_path}"
+try:
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    cur.execute("SELECT id, data FROM config WHERE id = 1")
+    row = cur.fetchone()
+    if not row:
+        print("ERROR: config table empty -- Open WebUI has not initialised")
+        sys.exit(1)
+
+    config_id, data_json = row
+    data = json.loads(data_json)
+
+    # Fix 1: embedding model must be nomic-embed-text not a chat model
+    data['RAG_EMBEDDING_MODEL'] = 'nomic-embed-text'
+
+    # Fix 2: SearXNG URL must include /search suffix
+    data['rag']['web']['search']['searxng_query_url'] = \
+        'http://localhost:${SEARXNG_PORT}/search'
+
+    # Fix 3 + 4: bypass embedding and web loader for CPU-only hardware
+    data['rag']['web']['search']['bypass_embedding_and_retrieval'] = True
+    data['rag']['web']['search']['bypass_web_loader'] = True
+
+    # Fix 5: async embedding
+    data['rag']['enable_async_embedding'] = True
+
+    # Fix 6: fewer results = less context injection
+    data['rag']['web']['search']['result_count'] = 3
+
+    # Fix 7: larger chunks = fewer embedding calls for knowledge base docs
+    data['rag']['chunk_size'] = 4000
+    data['rag']['chunk_overlap'] = 200
+
+    # Fix 8: fewer chunks from markdown documents
+    data['rag']['enable_markdown_header_text_splitter'] = False
+
+    # Fix 9: make sure embedding engine points to Ollama
+    data['rag']['embedding_engine'] = 'ollama'
+    data['rag']['embedding_model'] = 'nomic-embed-text'
+
+    cur.execute(
+        "UPDATE config SET data = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        (json.dumps(data), config_id)
+    )
+    conn.commit()
+    conn.close()
+    print("Config patched successfully")
+
+except Exception as e:
+    print(f"ERROR patching config: {e}")
+    sys.exit(1)
+PYEOF
+
+    if [[ $? -eq 0 ]]; then
+        log_ok "Open WebUI config patched"
+        # Restart to pick up new config
+        systemctl restart open-webui
+        log_info "Open WebUI restarted with patched config"
+    else
+        log_warn "Config patch failed -- web search may not work correctly"
+        log_warn "Run patch manually: see INSTALL_NOTES.md"
+    fi
 }
 
 # =============================================================================
@@ -715,7 +1014,8 @@ stage_lan() {
     http://${LAN_IP}:${OLLAMA_PORT}
 
   Sovereignty check:
-    sudo iptables -L OUTPUT | grep ollama
+    sudo sudo iptables -L OUTPUT --line-numbers | head -10
+    sudo -u ollama curl -s --max-time 5 https://ollama.com && echo BREACH || echo BLOCKED
 
   Install log:
     ${LOG_FILE}
@@ -752,6 +1052,13 @@ stage_verify() {
     log_info "Registered models:"
     ollama list 2>/dev/null | tee -a "$LOG_FILE" || true
 
+    # Verify nomic-embed-text specifically
+    if ollama list 2>/dev/null | grep -q "nomic-embed-text"; then
+        log_ok "nomic-embed-text present"
+    else
+        log_warn "nomic-embed-text not found -- web search embedding will fail"
+    fi
+
     if curl -s --max-time 5 "http://localhost:${WEBUI_PORT}" &>/dev/null || \
        curl -sk --max-time 5 "https://localhost" &>/dev/null; then
         log_ok "Open WebUI responding"
@@ -759,10 +1066,25 @@ stage_verify() {
         log_warn "Open WebUI not responding -- check: journalctl -u open-webui -f"
     fi
 
-    if iptables -L OUTPUT 2>/dev/null | grep -q "uid-owner"; then
-        log_ok "Sovereignty confirmed -- Ollama outbound blocked"
+    # Sovereignty check -- rules must be at positions 1 and 2
+    log_info "Final sovereignty verification..."
+    SOVEREIGNTY_RESULT=$(sudo -u ollama curl -s --max-time 5 \
+        https://ollama.com && echo "BREACH" || echo "BLOCKED")
+
+    if [[ "$SOVEREIGNTY_RESULT" == "BLOCKED" ]]; then
+        log_ok "SOVEREIGNTY VERIFIED -- Ollama cannot reach internet"
     else
-        log_warn "Sovereignty check failed -- verify manually: sudo iptables -L OUTPUT"
+        log_error "SOVEREIGNTY BREACH DETECTED"
+        log_error "Ollama CAN reach the internet -- iptables rules not working"
+        log_error "Check: sudo sudo iptables -L OUTPUT --line-numbers"
+        log_error "Rules for uid $(id -u ollama) must appear at positions 1 and 2"
+        all_ok=false
+    fi
+
+    if [[ "$all_ok" == "true" ]]; then
+        log_ok "All verification checks passed"
+    else
+        log_warn "Some checks failed -- review warnings above"
     fi
 
     echo "CORE_INSTALL_COMPLETE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> /etc/sovereign/hw.conf
@@ -770,6 +1092,8 @@ stage_verify() {
 
 # =============================================================================
 # STAGE 10 -- n8n WORKFLOW AUTOMATION (optional)
+# NOTE: NodeSource apt signing key requires internet. n8n is NOT fully
+# airgappable in this version. This is a known limitation.
 # =============================================================================
 stage_n8n() {
     [[ "$INSTALL_N8N" != "true" ]] && { log_info "n8n disabled -- skipping"; return; }
@@ -785,15 +1109,12 @@ stage_n8n() {
        [[ $(node -v 2>/dev/null | cut -d. -f1 | tr -d 'v') -lt 20 ]]; then
         log_info "Installing Node.js 22 LTS..."
         if [[ -f "$node_setup" ]]; then
-            # nodesource_setup_22.x.sh adds the apt repo then apt-get install does the rest
-            # It requires internet to add the repo signing key -- graceful fallback below
             if bash "$node_setup" 2>&1 | tee -a "$LOG_FILE"; then
                 DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs \
                     2>&1 | tee -a "$LOG_FILE"
                 log_ok "Node.js $(node -v) installed via NodeSource"
             else
                 log_warn "NodeSource setup failed -- trying direct download..."
-                # Download Node.js tarball directly as fallback
                 local node_url="https://nodejs.org/dist/v22.15.0/node-v22.15.0-linux-x64.tar.xz"
                 curl -fsSL "$node_url" | tar -xJ -C /usr/local --strip-components=1 \
                     2>&1 | tee -a "$LOG_FILE" && log_ok "Node.js installed from tarball"
@@ -1049,7 +1370,7 @@ main() {
     echo ""
     echo -e "${BOLD}${CYAN}"
     echo "  +--------------------------------------------------+"
-    echo "  |        SOVEREIGN OS v2.1 -- INSTALLING           |"
+    echo "  |        SOVEREIGN OS v2.2 -- INSTALLING           |"
     echo "  |   Sovereign AI for Developing Economies          |"
     echo "  +--------------------------------------------------+"
     echo -e "${RESET}"
@@ -1083,7 +1404,7 @@ main() {
     echo ""
     echo -e "${GREEN}${BOLD}"
     echo "  +--------------------------------------------------+"
-    echo "  |   SOVEREIGN OS INSTALLED SUCCESSFULLY            |"
+    echo "  |   SOVEREIGN OS v2.2 INSTALLED SUCCESSFULLY       |"
     echo "  +--------------------------------------------------+"
     echo -e "${RESET}"
     cat /etc/sovereign/access_info.txt
