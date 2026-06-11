@@ -40,7 +40,7 @@ All components are MIT or Apache 2.0 licensed. No US-controlled proprietary depe
 
 - **OS:** Ubuntu Server 22.04.5 LTS
 - **AI Runtime:** Ollama
-- **Models:** Mistral 7B, Qwen 3 7B and 3B (Q4_K_M quantised)
+- **Models:** Mistral 7B, Qwen 2.5 7B
 - **Interface:** Open WebUI (browser-based, LAN accessible)
 - **Speech to Text:** Whisper
 - **Text to Speech:** Piper TTS
@@ -81,7 +81,7 @@ See the [white paper](https://thedxjournal.com/sovereign-ai/) for full hardware 
 1. Run `populate.ps1` on Windows to download all assets to the USB (~21GB)
 2. Boot the target machine from USB — Ubuntu Server installs automatically
 3. SSH into the machine after install completes
-4. Run `sudo bash /opt/sovereign/install.sh`
+4. Run `sudo bash install.sh`
 5. Access Open WebUI at `https://[machine-ip]` from any browser on your network
 
 Full step-by-step instructions in `docs/sovereign-os-setup-guide-v4.html`
