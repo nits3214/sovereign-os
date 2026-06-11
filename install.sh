@@ -193,6 +193,10 @@ stage_usb_copy() {
     umount "$usb_mount" 2>/dev/null || true
     log_ok "USB unmounted -- install continues from SSD"
 
+    # Deploy demo_access.sh to /opt/sovereign for easy access
+    cp "$ASSETS_DIR/demo_access.sh" /opt/sovereign/demo_access.sh 2>/dev/null || true
+    chmod +x /opt/sovereign/demo_access.sh 2>/dev/null || true
+
     USB_SOURCE="$ASSETS_DIR"
     log_ok "USB_SOURCE set to: $USB_SOURCE"
 }
