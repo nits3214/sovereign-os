@@ -550,7 +550,7 @@ stage_models() {
     source /etc/sovereign/hw.conf
 
     case "$HW_TIER" in
-        A|B)   MODELS_TO_INSTALL=("$MODEL_PRIMARY" "$MODEL_SECONDARY") ;;
+	A|B)   MODELS_TO_INSTALL=("$MODEL_PRIMARY" "$MODEL_SECONDARY" "$MODEL_SMALL") ;;
         C)     MODELS_TO_INSTALL=("$MODEL_PRIMARY" "$MODEL_SMALL") ;;
         D)     MODELS_TO_INSTALL=("$MODEL_SMALL") ;;
     esac
@@ -788,6 +788,8 @@ Environment="ENABLE_UPDATE_CHECK=false"
 Environment="DO_NOT_TRACK=true"
 Environment="ENABLE_IMAGE_GENERATION=false"
 Environment="ENABLE_COMMUNITY_SHARING=false"
+Environment="RAG_EMBEDDING_ENGINE=ollama"
+Environment="RAG_EMBEDDING_MODEL=nomic-embed-text"
 StandardOutput=journal
 StandardError=journal
 
@@ -816,7 +818,7 @@ EOF
     if [[ "$webui_ready" == "true" ]]; then
         log_ok "Open WebUI running and DB initialised"
         # Extra 10s for DB to finish writing initial config rows
-        sleep 10
+        sleep 30
         patch_openwebui_config
     else
         log_warn "Open WebUI did not respond or DB not found -- skipping config patch"
