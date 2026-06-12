@@ -28,6 +28,10 @@ set -e
 WEBUI_PORT=8080
 SEARXNG_PORT=8888
 LOG_FILE="/var/log/demo_access.log"
+
+# Ensure log file exists and is writable
+sudo touch "$LOG_FILE" 2>/dev/null && sudo chmod 666 "$LOG_FILE" 2>/dev/null || true
+
 CLOUDFLARED_BIN="/usr/local/bin/cloudflared"
 CLOUDFLARE_PID_FILE="/tmp/cloudflared_demo.pid"
 
@@ -88,7 +92,13 @@ install_tailscale() {
         echo -e "${YELLOW}→ A browser URL will appear below. Open it to authenticate.${NC}"
         echo ""
         sudo tailscale up
-        log "Tailscale connected"
+	# Open UFW for Tailscale interface
+	    sudo ufw allow in on tailscale0 to any port "$WEBUI_PORT" comment "Open WebUI Tailscale" 2>/dev/null || true
+	    sudo ufw allow in on tailscale0 to any port "$SEARXNG_PORT" comment "SearXNG Tailscale" 2>/dev/null || true
+	    sudo ufw allow in on tailscale0 to any port "$N8N_PORT" comment "n8n Tailscale" 2>/dev/null || true
+	    sudo ufw reload 2>/dev/null || true
+
+log "Tailscale connected"
     fi
 
     echo ""
